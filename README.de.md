@@ -16,8 +16,10 @@ war das ein **Puya P25Q80** (JEDEC `85 60 14`). Neuere Geräte — die meisten, 
 jetzt über AliExpress verschickt werden — tragen stattdessen einen **UC25HQ80**
 (JEDEC `B3 60 14`).
 
-Beide Chips sprechen *dieselben* SPI‑NOR‑Kommandos. Sie unterscheiden sich genau in
-dem einen Punkt, der zählt: **der JEDEC‑ID, die eine Firmware beim Probe liest.**
+Der Emulator modelliert die üblichen SPI‑NOR-Erase-/Program-Kommandos für beide
+Bausteine und variiert **die JEDEC-ID, die eine Firmware beim Erkennen liest**.
+Damit wird eine bekannte Kompatibilitätsprüfung isoliert. Elektrisches Verhalten,
+Timing und Schutzfunktionen realer Chips sind damit nicht vollständig geprüft.
 Eine Firmware, die nur die Puya‑ID kennt, hält das neuere Gerät für *unbekannt* —
 sie bootet zwar, aber **ihre Saves bleiben im RAM und verschwinden beim
 Ausschalten.** Der Installer verweigert unter Umständen sogar die Installation.
@@ -37,7 +39,11 @@ Emulation des FM‑1 aus und prüft pro Chip die drei Dinge, die kaputtgehen:
 | **save** | Schreibt `SAVE` wirklich ins Flash (Sektor‑Erase + Page‑Program) — oder nur ins RAM? |
 | **reboot** | Übersteht der Speicherstand einen Neustart (Flash‑Image neu geladen, Daten byte‑identisch, kein Re‑Write)? |
 
-Alle drei auf `uc25hq80` bestehen → die Firmware ist für die neueren Geräte sicher.
+Alle drei Tests auf `uc25hq80` bestätigen den modellierten Boot-/Save-/Neustartpfad.
+Sie sind **keine Sicherheits- oder Kompatibilitätsgarantie für echte Hardware**.
+Die Prüfung auf einem realen UC25HQ80-FM-1 bleibt offen:
+[Hardware-Testaufruf](https://github.com/kidbee85-beep/mutable-dreams/issues/21).
+Vor einem Gerätetest Nutzerdaten sichern und den Bootloader-Status getrennt prüfen.
 
 ## Das Ergebnis für Mutable Dreams 2.3
 
@@ -52,7 +58,9 @@ RESULT: ALL PASS
 Auf beiden Chips schreibt `SAVE` dieselben Sektoren (`0x0DA000`, `0x0FC000`) mit
 derselben Erase/Program‑Folge, und der Speicherstand übersteht den Neustart
 **byte‑identisch**. [Mutable Dreams](https://github.com/kidbee85-beep/mutable-dreams)
-erkennt die neue ID und speichert auf der neueren Hardware korrekt.
+erkennt die neue ID und speichert im modellierten UC25HQ80-Flash korrekt.
+Eine entsprechende Bestätigung von Speichern und stromlosem Neustart auf dem
+realen UC25HQ80-Gerät liegt noch nicht vor.
 
 ## Warum der Test realistisch ist
 
