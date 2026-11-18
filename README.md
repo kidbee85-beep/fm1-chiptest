@@ -15,8 +15,10 @@ Every FM‑1 stores its firmware in a 1 MiB SPI‑NOR flash. Until autumn 2026 t
 was a **Puya P25Q80** (JEDEC `85 60 14`). Newer units — most of the ones now
 shipped from AliExpress — come with a **UC25HQ80** (JEDEC `B3 60 14`) instead.
 
-The two chips speak the *same* SPI‑NOR commands. They differ in exactly one way
-that matters: **the JEDEC ID a firmware reads when it probes the chip.** A
+The emulator models the standard SPI‑NOR erase/program interface for both
+parts and varies **the JEDEC ID a firmware reads when it probes the chip**.
+This isolates a known firmware compatibility check; it does not establish that
+all electrical, timing or protection behaviour is identical on physical chips. A
 firmware that only knows the Puya ID takes the newer unit for *unknown* — it
 still boots, but **its saves stay in RAM and vanish on power‑off.** Its update
 loader may even refuse to install.
@@ -35,7 +37,10 @@ the FM‑1 and checks, per chip, the three things that break:
 | **save** | Does pressing `SAVE` write to flash (sector erase + page program), or only to RAM? |
 | **reboot** | Does the save survive a power cycle (reload the flash image, data byte‑identical, no re‑write)? |
 
-Pass all three on `uc25hq80` and the firmware is safe for the newer units.
+Passing all three on `uc25hq80` verifies the modeled boot/save/reboot path.
+It is **not a hardware-safety or compatibility guarantee**. Qualification on a
+real UC25HQ80 FM-1 remains open: [hardware-test request](https://github.com/kidbee85-beep/mutable-dreams/issues/21).
+Back up user data and keep bootloader qualification separate before any device test.
 
 ## The result for Mutable Dreams 2.3
 
@@ -51,7 +56,8 @@ RESULT: ALL PASS — the firmware runs and saves on both flash chips.
 On both chips the `SAVE` writes the same sectors (`0x0DA000`, `0x0FC000`) with the
 same erase/program sequence, and the save survives a reboot **byte‑identically**.
 [Mutable Dreams](https://github.com/kidbee85-beep/mutable-dreams) recognises the
-`B3 60 14` ID and persists correctly on the newer hardware.
+`B3 60 14` ID and persists correctly in the modeled UC25HQ80 flash. A matching
+physical save/cold-start result has not yet been confirmed.
 
 ## Why this is a realistic test
 
