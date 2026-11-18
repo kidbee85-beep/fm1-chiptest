@@ -1,0 +1,273 @@
+#!/usr/bin/env python3
+"""fm1-chiptest — test a firmware on BOTH M-VAVE FM-1 flash chips in emulation.
+
+Checks, per flash part (the stock Puya P25Q80 and the newer UC25HQ80), whether a
+firmware package really runs and saves:
+
+  boot    the firmware reaches a running state (audio out, LCD on, no crash)
+  save    pressing SAVE writes to flash (erase + page program), not just RAM
+  reboot  the save survives a power cycle (reload the flash image and verify
+          the data is still there, byte-identical, with no re-write needed)
+
+Built on the FM-1 emulator by Joakim Eriksson (https://github.com/joakimeriksson/fm1-emu),
+which runs the firmware unchanged and models both flash parts (--flash-chip).
+
+Usage:
+  fm1-chiptest [--firmware PATH.fwsc] [--chips p25q80,uc25hq80]
+               [--emu-dir DIR] [--ms N] [--save-at MS] [--json FILE] [--quiet]
+
+The first run downloads the emulator binaries and the default firmware
+(Mutable Dreams 2.3) and caches them under ~/.cache/fm1-chiptest/.
+"""
+import argparse
+import hashlib
+import json
+import os
+import platform
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import urllib.request
+
+EMU_VERSION = "0.5.1"
+EMU_BASE = f"https://github.com/joakimeriksson/fm1-emu/releases/download/v{EMU_VERSION}"
+DEFAULT_FW = "Mutable-Dreams-2.3.fwsc"
+DEFAULT_FW_URL = f"https://github.com/kidbee85-beep/mutable-dreams/raw/main/{DEFAULT_FW}"
+CACHE = os.environ.get("FM1_CHIPTEST_CACHE") or os.path.join(
+    os.path.expanduser("~"), ".cache", "fm1-chiptest")
+
+CHIPS = {
+    "p25q80": "stock Puya P25Q80 (JEDEC 85 60 14)",
+    "uc25hq80": "newer UC25HQ80 (JEDEC B3 60 14)",
+}
+
+# which emulator archive to fetch for this machine (None = unsupported)
+def emu_asset():
+    s = platform.system().lower()
+    m = platform.machine().lower()
+    if s == "darwin" and m in ("arm64", "aarch64"):
+        return "macos-arm64", ".tar.gz"
+    if s == "linux" and m in ("arm64", "aarch64"):
+        return "linux-arm64", ".tar.gz"
+    if s == "linux" and m in ("x86_64", "amd64"):
+        return "linux-x86_64", ".tar.gz"
+    if s == "windows" and m in ("x86_64", "amd64"):
+        return "windows-x86_64", ".zip"
+    return None, None
+
+
+def _bin_names():
+    """(fm1_emu_name, fm1_live_name) for this platform."""
+    if platform.system().lower() == "windows":
+        return "fm1-emu.exe", "fm1-live.exe"
+    return "fm1-emu", "fm1-live"
+
+
+def log(msg):
+    print(msg, flush=True)
+
+
+def fetch(url, dest):
+    with urllib.request.urlopen(url, timeout=120) as r, open(dest, "wb") as f:
+        shutil.copyfileobj(r, f)
+
+
+def ensure_emulator(emu_dir):
+    """Return (fm1_emu, fm1_live) paths, downloading them if needed."""
+    asset, ext = emu_asset()
+    if asset:
+        name = f"fm1-emu-{EMU_VERSION}-{asset}"
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+
+    candidates = []
+    if emu_dir:
+        candidates.append(emu_dir)
+    else:
+        if not asset:
+            sys.exit(f"unsupported platform: {platform.system()} {platform.machine()}; "
+                     "pass --emu-dir with fm1-emu + fm1-live binaries")
+        # binaries bundled next to the script (release archive: flat bin/, or
+        # bin/<release>/), then the download cache
+        candidates.append(os.path.join(script_dir, "bin"))
+        candidates.append(os.path.join(script_dir, "bin", name))
+        candidates.append(os.path.join(CACHE, "bin", name))
+
+    for d in candidates:
+        emu = os.path.join(d, _bin_names()[0])
+        live = os.path.join(d, _bin_names()[1])
+        if os.path.isfile(emu) and os.path.isfile(live):
+            return emu, live
+
+    if emu_dir:  # the user pointed at a folder, but the binaries aren't there
+        sys.exit(f"fm1-emu / fm1-live not found in {emu_dir}")
+
+    d = candidates[-1]
+    os.makedirs(d, exist_ok=True)
+    name = f"fm1-emu-{EMU_VERSION}-{asset}"
+    arc = os.path.join(CACHE, "bin", name + ext)
+    url = f"{EMU_BASE}/{name}{ext}"
+    log(f"downloading emulator: {url}")
+    if ext == ".tar.gz":
+        fetch(url, arc)
+        subprocess.run(["tar", "-xzf", arc, "-C", d], check=True)
+    else:
+        fetch(url, arc)
+        subprocess.run(["unzip", "-qo", arc, "-d", d], check=True)
+    # the archive extracts into a subfolder named after the release
+    emu_name, live_name = _bin_names()
+    found = []
+    for root, _dirs, files in os.walk(d):
+        for fn in files:
+            if fn in (emu_name, live_name):
+                found.append(os.path.join(root, fn))
+    for src in found:
+        os.replace(src, os.path.join(d, os.path.basename(src)))
+    if not (os.path.isfile(os.path.join(d, emu_name)) and
+            os.path.isfile(os.path.join(d, live_name))):
+        sys.exit(f"could not find {emu_name} / {live_name} after extracting {arc}")
+    return os.path.join(d, emu_name), os.path.join(d, live_name)
+
+
+def ensure_firmware(path):
+    if path and os.path.isfile(path):
+        return path
+    cached = os.path.join(CACHE, DEFAULT_FW)
+    if os.path.isfile(cached):
+        return cached
+    log(f"downloading default firmware: {DEFAULT_FW_URL}")
+    os.makedirs(CACHE, exist_ok=True)
+    fetch(DEFAULT_FW_URL, cached)
+    return cached
+
+
+def boot_test(emu, fwsc, chip, ms):
+    with tempfile.TemporaryDirectory() as td:
+        wav = os.path.join(td, "boot.wav")
+        r = subprocess.run(
+            [emu, "--fwsc", fwsc, "--flash-chip", chip, "--ms", str(ms),
+             "--wav", wav],
+            text=True, capture_output=True, timeout=600)
+    out = r.stderr + r.stdout
+    d = {"exit": r.returncode}
+    m = re.search(r"(\d+) audio halves \((\d+) samples\)", out)
+    if m:
+        d["audio_samples"] = int(m.group(2))
+    m = re.search(r"lcd frames=(\d+) inverted=\w+ display_on=(\w+)", out)
+    if m:
+        d["lcd_frames"] = int(m.group(1))
+        d["display_on"] = m.group(2)
+    d["ran_full_budget"] = bool(re.search(r"time \d+ ms", out))
+    d["pass"] = bool(d["exit"] == 0 and d.get("audio_samples", 0) > 0
+                     and d.get("lcd_frames", 0) > 0
+                     and d.get("display_on") == "true" and d["ran_full_budget"])
+    return d
+
+
+def save_test(emu, fwsc, chip, ms, save_at):
+    env = dict(os.environ, FM1_FLASH_TRACE="1")
+    r = subprocess.run(
+        [emu, "--fwsc", fwsc, "--flash-chip", chip,
+         "--keys", f"{save_at}:SAVE", "--ms", str(ms)],
+        text=True, capture_output=True, timeout=900, env=env)
+    writes = []
+    for line in (r.stderr + r.stdout).splitlines():
+        m = re.search(r"flash cmd (02|20|d8) addr ([0-9a-f]+) bytes (\d+)", line)
+        if m:
+            writes.append((m.group(1), m.group(2), int(m.group(3))))
+    erases = [w for w in writes if w[0] in ("20", "d8")]
+    progs = [w for w in writes if w[0] == "02"]
+    d = {"write_commands": len(writes), "sector_erases": len(erases),
+         "page_programs": len(progs),
+         "erased_sectors": sorted({w[1] for w in erases})}
+    d["pass"] = bool(len(erases) >= 1 and len(progs) >= 1)
+    return d
+
+
+def reboot_test(live, fwsc, chip, ms, save_at):
+    """Save, then power-cycle by reloading the flash image; the data must survive."""
+    with tempfile.TemporaryDirectory() as td:
+        flash = os.path.join(td, "flash.bin")
+        env = dict(os.environ, FM1_BENCH_KEYS=f"{save_at}:SAVE,{save_at+150}:SAVE^")
+        r1 = subprocess.run(
+            [live, "--fwsc", fwsc, "--flash-chip", chip,
+             "--flash", flash, "--bench", str(ms)],
+            text=True, capture_output=True, timeout=600, env=env)
+        writes1 = _live_flash_writes(r1.stderr + r1.stdout)
+        h1 = hashlib.sha256(open(flash, "rb").read()).hexdigest() if os.path.isfile(flash) else None
+        # power cycle: boot the same flash image again, no SAVE
+        r2 = subprocess.run(
+            [live, "--fwsc", fwsc, "--flash-chip", chip,
+             "--flash", flash, "--bench", str(ms)],
+            text=True, capture_output=True, timeout=600)
+        writes2 = _live_flash_writes(r2.stderr + r2.stdout)
+        h2 = hashlib.sha256(open(flash, "rb").read()).hexdigest() if os.path.isfile(flash) else None
+    d = {"save_writes": writes1, "reboot_writes": writes2,
+         "flash_hash_save": h1, "flash_hash_reboot": h2}
+    d["pass"] = bool(writes1 > 0 and writes2 == 0 and h1 is not None and h1 == h2)
+    return d
+
+
+def _live_flash_writes(out):
+    m = re.search(r"flash: (\d+) erases / programs", out)
+    return int(m.group(1)) if m else -1
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Test a firmware on both FM-1 flash chips")
+    ap.add_argument("--firmware", help="path to a .fwsc package (default: download Mutable Dreams 2.3)")
+    ap.add_argument("--chips", default="p25q80,uc25hq80")
+    ap.add_argument("--emu-dir", help="folder containing fm1-emu and fm1-live")
+    ap.add_argument("--ms", type=int, default=3000, help="emulated runtime per test (ms)")
+    ap.add_argument("--save-at", type=int, default=1500, help="when to press SAVE (ms)")
+    ap.add_argument("--json", help="write the machine-readable report here")
+    ap.add_argument("--quiet", action="store_true")
+    args = ap.parse_args()
+
+    emu, live = ensure_emulator(args.emu_dir)
+    fwsc = ensure_firmware(args.firmware)
+    chips = args.chips.split(",")
+    fwname = os.path.basename(fwsc)
+
+    if not args.quiet:
+        log(f"FM-1 chip compatibility — {fwname}")
+        log(f"emulator: {emu}")
+        log("=" * 60)
+
+    report = {"firmware": fwname, "chips": {}}
+    all_ok = True
+    for chip in chips:
+        entry = {"description": CHIPS.get(chip, chip)}
+        if not args.quiet:
+            log(f"\n{chip:10s}  {CHIPS.get(chip, chip)}")
+        boot = boot_test(emu, fwsc, chip, args.ms)
+        save = save_test(emu, fwsc, chip, args.ms, args.save_at)
+        reboot = reboot_test(live, fwsc, chip, args.ms, args.save_at)
+        entry.update(boot=boot["pass"], save=save["pass"], reboot=reboot["pass"],
+                     boot_detail=boot, save_detail=save, reboot_detail=reboot)
+        report["chips"][chip] = entry
+        if not args.quiet:
+            log(f"  boot:   {'PASS' if boot['pass'] else 'FAIL'}  "
+                f"(audio={boot.get('audio_samples', 0)} samples, LCD={boot.get('lcd_frames', 0)})")
+            log(f"  save:   {'PASS' if save['pass'] else 'FAIL'}  "
+                f"({save['write_commands']} writes = {save['sector_erases']} erases + "
+                f"{save['page_programs']} programs)")
+            log(f"  reboot: {'PASS' if reboot['pass'] else 'FAIL'}  "
+                f"(save {reboot['save_writes']} writes, reboot {reboot['reboot_writes']} rewrites, "
+                f"flash {'unchanged' if reboot['flash_hash_save'] == reboot['flash_hash_reboot'] else 'CHANGED'})")
+        all_ok = all_ok and boot["pass"] and save["pass"] and reboot["pass"]
+
+    if not args.quiet:
+        log("\n" + "=" * 60)
+        log("RESULT: " + ("ALL PASS — the firmware runs and saves on both flash chips."
+                          if all_ok else "FAILURES PRESENT — see above."))
+
+    if args.json:
+        with open(args.json, "w") as f:
+            json.dump(report, f, indent=2)
+    return 0 if all_ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
