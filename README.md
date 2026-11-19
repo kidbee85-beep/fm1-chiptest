@@ -50,7 +50,7 @@ p25q80    stock Puya P25Q80 (JEDEC 85 60 14)
   boot:   PASS   save:   PASS (16 writes)   reboot: PASS
 uc25hq80  newer UC25HQ80 (JEDEC B3 60 14)
   boot:   PASS   save:   PASS (16 writes)   reboot: PASS
-RESULT: ALL PASS — the firmware runs and saves on both flash chips.
+RESULT: ALL PASS — the firmware runs and saves in both configured flash models.
 ```
 
 On both chips the `SAVE` writes the same sectors (`0x0DA000`, `0x0FC000`) with the
@@ -68,10 +68,12 @@ interrupts, the SPI‑NOR flash, the 240×240 screen, the key matrix and encoder
 the audio output and the MIDI UART. It runs the *actual* `.fwsc` update package,
 not a reimplementation.
 
-Critically, its flash model distinguishes the two parts by exactly the thing the
-hardware distinguishes — the JEDEC ID (`--flash-chip p25q80|uc25hq80`). Erase and
-program are identical. So the test measures precisely what a real unit would:
-**does the firmware recognise the newer chip's ID and persist to it?**
+The two configured flash models use different JEDEC IDs
+(`--flash-chip p25q80|uc25hq80`) and the same modeled erase/program behaviour.
+The test therefore isolates **whether the firmware recognises each configured
+ID and persists data in that model**. It does not measure physical chip timing,
+electrical behaviour, protection registers or real power loss; those require
+separate hardware tests.
 
 `fm1-chiptest` also shares its save test with the approach the community uses to
 spot this bug: the emulator's `FM1_FLASH_TRACE` shows that a firmware which only
