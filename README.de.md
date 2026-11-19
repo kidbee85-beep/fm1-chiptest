@@ -71,11 +71,12 @@ Interrupts, das SPI‑NOR‑Flash, das 240×240‑Display, Tastenmatrix und Enco
 Audio‑Ausgang und den MIDI‑UART. Er führt das *echte* `.fwsc`‑Update‑Paket aus,
 keine Neuimplementierung.
 
-Entscheidend: Sein Flash‑Modell unterscheidet die beiden Teile genau an dem, was
-auch die Hardware unterscheidet — der JEDEC‑ID (`--flash-chip p25q80|uc25hq80`).
-Erase und Program sind identisch. Der Test misst also genau das, was ein echtes
-Gerät messen würde: **erkennt die Firmware die neue Chip‑ID und persistiert sie
-dorthin?**
+Die beiden konfigurierten Flash-Modelle verwenden unterschiedliche JEDEC-IDs
+(`--flash-chip p25q80|uc25hq80`) und dasselbe modellierte Erase-/Program-Verhalten.
+Der Test isoliert damit **ob die Firmware die jeweilige konfigurierte ID erkennt
+und Daten in diesem Modell dauerhaft speichert**. Reales Chip-Timing, elektrische
+Eigenschaften, Schutzregister und tatsächlicher Stromverlust werden damit nicht
+gemessen; dafür sind separate Hardwaretests erforderlich.
 
 ## Installation & Benutzung
 
